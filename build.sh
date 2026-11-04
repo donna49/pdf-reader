@@ -58,17 +58,17 @@ MUPDF_XCFLAGS="-DTOFU -DTOFU_CJK -DTOFU_SIL -DTOFU_EMOJI -DTOFU_HISTORIC \
  -DFZ_ENABLE_DOCX_OUTPUT=0 -Wno-unused-but-set-variable"
 
 build_arch() {
-	local arch="$1" triple
+	local arch="$1" triple archflags
 	case "$arch" in
-		arm64) triple=aarch64-w64-mingw32 ;;
-		x64)   triple=x86_64-w64-mingw32 ;;
+		arm64) triple=aarch64-w64-mingw32; archflags="" ;;
+		x64)   triple=x86_64-w64-mingw32; archflags="-msse4.1" ;;  # every Windows 11 x64 CPU has SSE4.1
 		*) echo "unknown arch $arch"; exit 1 ;;
 	esac
 	echo ">> building MuPDF for $arch"
 	make -C "$MUPDF" -j"$JOBS" "${MUPDF_FLAGS[@]}" \
 		OUT="build/$arch" \
 		CC="$triple-clang" CXX="$triple-clang++" AR="$triple-ar" RANLIB="$triple-ranlib" \
-		XCFLAGS="$MUPDF_XCFLAGS" libs
+		XCFLAGS="$MUPDF_XCFLAGS $archflags" libs
 
 	echo ">> building FeatherPDF for $arch"
 	local obj="$OUT/obj-$arch"

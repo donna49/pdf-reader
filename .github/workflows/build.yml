@@ -1,0 +1,105 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache toolchain and MuPDF
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/*.tar.*
+          key: deps-${{ hashFiles('build.sh') }}
+
+      - name: Build (ARM64 + x64)
+        run: bash build.sh arm64 x64
+
+      - name: Package
+        run: |
+          python3 tools/make_test_pdf.py dist/test.pdf
+          for a in arm64 x64; do
+            d=dist/FeatherPDF-$a
+            mkdir -p $d
+            cp dist/$a/FeatherPDF.exe $d/
+            cp install/install.ps1 install/uninstall.ps1 install/Install.cmd $d/
+            cp README.md LICENSE $d/
+            (cd dist && zip -9 -r FeatherPDF-$a.zip FeatherPDF-$a)
+          done
+          ls -l dist dist/*/FeatherPDF.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FeatherPDF-binaries
+          path: |
+            dist/FeatherPDF-arm64.zip
+            dist/FeatherPDF-x64.zip
+            dist/test.pdf
+
+  smoke-test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    # Windows-on-ARM runners are not available on every plan; don't block the release on it.
+    continue-on-error: ${{ matrix.arch == 'arm64' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: FeatherPDF-binaries
+      - name: Launch, open a PDF, measure memory
+        shell: pwsh
+        run: |
+          Expand-Archive FeatherPDF-${{ matrix.arch }}.zip -DestinationPath .
+          $exe = Resolve-Path "FeatherPDF-${{ matrix.arch }}\FeatherPDF.exe"
+          "exe size: {0:N0} KB" -f ((Get-Item $exe).Length / 1KB)
+          $p = Start-Process $exe -ArgumentList "`"$((Resolve-Path test.pdf).Path)`"" -PassThru
+          Start-Sleep -Seconds 6
+          $p.Refresh()
+          if ($p.HasExited) { throw "FeatherPDF exited early with code $($p.ExitCode)" }
+          if ($p.MainWindowTitle -notlike 'test.pdf*') { throw "Unexpected window title: '$($p.MainWindowTitle)'" }
+          "window title : $($p.MainWindowTitle)"
+          "working set  : {0:N1} MB" -f ($p.WorkingSet64 / 1MB)
+          "private bytes: {0:N1} MB" -f ($p.PrivateMemorySize64 / 1MB)
+          $p.CloseMainWindow() | Out-Null
+          if (-not $p.WaitForExit(5000)) { $p.Kill(); throw "did not close cleanly" }
+          "closed cleanly, exit code $($p.ExitCode)"
+
+  release:
+    needs: smoke-test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: FeatherPDF-binaries
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            gh release create "$tag" FeatherPDF-arm64.zip FeatherPDF-x64.zip --title "FeatherPDF $tag" --notes "Download FeatherPDF-arm64.zip for Windows on ARM (Snapdragon / Surface Laptop 7), FeatherPDF-x64.zip for Intel/AMD PCs."
+          else
+            tag="latest"
+            gh release delete "$tag" --yes --cleanup-tag || true
+            gh release create "$tag" FeatherPDF-arm64.zip FeatherPDF-x64.zip --target "$GITHUB_SHA" --title "FeatherPDF (latest build)" --latest \
+              --notes "Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}. Download **FeatherPDF-arm64.zip** for Windows on ARM (Snapdragon, e.g. Surface Laptop 7) or **FeatherPDF-x64.zip** for Intel/AMD PCs. Unzip, then double-click Install.cmd."
+          fi
